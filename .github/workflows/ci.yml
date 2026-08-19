@@ -1,0 +1,23 @@
+name: CI
+
+# 无 GPU、无 torch 的轻量冒烟：数据管线/评测候选池/zip 安全/压测统计单测 + ruff。
+# torch 相关测试类在无 torch 环境下自动跳过（skipUnless HAS_TORCH），
+# 训练/评测的 GPU 验证在 4×3090 开发机上完成（见 README 0.1）。
+on: [push, pull_request]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-smoke.txt ruff==0.15.17 pytest==9.1.1
+      - name: Unit tests
+        run: PYTHONPATH=$PWD python -m unittest discover -s tests -v
+      - name: Lint
+        run: ruff check .

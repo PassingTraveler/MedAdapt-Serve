@@ -1,0 +1,14 @@
+# 训练环境。锁定为 vip2023-2 omni 环境实测跑通的版本组合
+# （全量 SFT 冒烟 100/100 步 + LoRA 正式训练，4×RTX 3090，2026-08 实测；
+# 关键训练结论见 train/train_full_smoke.py 注释）。
+# 注意：不要与 requirements-serve.txt 装进同一个 venv ——
+# transformers==5.15.0 与 vllm 对 transformers/torch 的严格 pin 会冲突。
+-r requirements-smoke.txt
+--extra-index-url https://download.pytorch.org/whl/cu129
+numpy==1.26.4
+torch==2.8.0+cu129
+accelerate==1.14.0
+peft==0.20.0
+bitsandbytes==0.50.1
+datasets==3.6.0
+transformers==5.15.0

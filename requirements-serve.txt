@@ -1,0 +1,6 @@
+# 服务环境。注意：与 requirements-train.txt（transformers==5.15.0）分开安装，
+# 两个环境混装会导致 vllm 的 transformers/torch pin 冲突。
+# vllm pin 取 2026-08 PyPI 最新版；服务冒烟实测后如需调整在此更新。
+-r requirements-smoke.txt
+openai>=1.60,<2
+vllm==0.27.1
