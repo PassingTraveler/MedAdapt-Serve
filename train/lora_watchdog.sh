@@ -23,11 +23,17 @@ echo "[watchdog $(date '+%F %T')] started (pid $$)"
 restarts=0
 while true; do
   sleep 300
-  workers=$(pgrep -fc "$WORKER_PAT" 2>/dev/null || echo 0)
+  # pgrep -c 零匹配时会打印 0 并返回退出码 1，不能用 || echo 0（会得到 "0\n0" 破坏整数比较）
+  workers=$(pgrep -fc "$WORKER_PAT" 2>/dev/null || true)
+  workers=$(printf '%s' "$workers" | tr -dc '0-9')
+  [ -z "$workers" ] && workers=0
   [ "$workers" -ge 4 ] && continue
   echo "[watchdog $(date '+%F %T')] workers=$workers (<4), grace 600s"
   sleep 600
-  workers=$(pgrep -fc "$WORKER_PAT" 2>/dev/null || echo 0)
+  # pgrep -c 零匹配时会打印 0 并返回退出码 1，不能用 || echo 0（会得到 "0\n0" 破坏整数比较）
+  workers=$(pgrep -fc "$WORKER_PAT" 2>/dev/null || true)
+  workers=$(printf '%s' "$workers" | tr -dc '0-9')
+  [ -z "$workers" ] && workers=0
   [ "$workers" -ge 4 ] && continue
 
   ts=$(date '+%F %T')
@@ -48,7 +54,9 @@ while true; do
   # shellcheck disable=SC1090
   source "$CONDA_SH" && conda activate omni
   cd "$PROJ" || exit 1
-  PYTHONPATH=$PROJ CUDA_VISIBLE_DEVICES=$DEVICES nohup torchrun --standalone --nproc_per_node=4 \
+  # setsid：训练进程树脱离 watchdog 的会话/进程组，tmux kill-session 的 SIGHUP 不再波及训练
+  # （torchrun elastic agent 会自己安装 SIGHUP 处理器，nohup 挡不住；2026-08-20 曾因此误杀训练）。
+  PYTHONPATH=$PROJ CUDA_VISIBLE_DEVICES=$DEVICES setsid nohup torchrun --standalone --nproc_per_node=4 \
     -m train.train_lora --model "$MODEL" \
     --train-data data/processed/sft/train.jsonl \
     --eval-data data/processed/sft/val.jsonl \
