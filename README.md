@@ -35,7 +35,7 @@ Qwen3.5 官方模型卡：<https://huggingface.co/Qwen/Qwen3.5-9B>、<https://hu
 - 数据管线：CMB 去重 269,093→239,895（去 29,198），SFT 80,000 条 / 无效丢弃 0，val 280 条（manifest 见 out/manifests/）；
 - 测试：21 个单测全部通过，ruff 0 错误。
 
-尚未完成：vLLM 服务与压测真实数字、量化格式对照、CMB test 全量评测与跨题库/通用保持评测（M4-M6）。
+尚未完成：vLLM 服务与压测真实数字、量化格式对照、跨题库/通用保持评测（M5-M6）。
 
 ### 0.2 快速开始
 
@@ -90,7 +90,7 @@ torchrun --standalone --nproc_per_node=4 -m train.train_lora \
 
 ```bash
 # 候选池只由 question_type 决定（多项选择题评全部 2..n 元组合），不使用 gold 宽度。
-# 训练占用 GPU 4-7 时，用空闲的 0-3 跑评测互不干扰。
+# 0-3 卡常被他人占用；实验统一跑 GPU 4-7。
 CUDA_VISIBLE_DEVICES=0,1,2,3 python -m eval.eval_cmb_logprob \
   --model out/models/Qwen--Qwen3.5-9B-Base \
   --data data/processed/cmb/val.jsonl \
@@ -163,7 +163,7 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 
 - `CMB-Exam train`：269,359 条；
 - `CMB-Exam val`：280 条，带 solutions/explanations，用于开发、few-shot 或 CoT 参考；
-- `CMB-Exam test`：11,200 条；
+- `CMB-Exam test`：11,200 条，**不含答案**（官方 held-out 设计，答案不公开，无法本地评测 acc）；
 - `CMB-Clin`：74 个复杂病例，作为定性案例，不承担强统计结论。
 
 ### 2.1 数据使用规则
@@ -172,7 +172,7 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 |---|---|---|
 | CMB-Exam train | 主 SFT 数据 | 从 269,359 条中抽取 80,000 条；不使用 val/test |
 | CMB-Exam val | 开发集、格式调试、few-shot | 固定保留 280 条，不进入训练 |
-| CMB-Exam test | 最终主评测 | 11,200 条，只在最终评测使用 |
+| 训练未见 held-out | 最终主评测 | train 去重后 239,690 条中排除 SFT 用到的 80,000 条，余 159,690 条训练完全未见；seed 20260818 抽样 5,000 条（多选 493）→ data/processed/cmb/heldout_5000.jsonl（构建脚本 data/build_heldout.py） |
 | 医疗对话 | 可选混合数据 | 最多占训练 token 的 10%；必须记录具体数据集、许可证和过滤比例 |
 | 通用保持数据 | 防遗忘 | 项目一数学/通用数据最多占训练 token 的 5% |
 | 教师解析 | 后续扩展 | 不进入主线；若使用，必须记录教师模型、生成参数、抽检结果和 API 成本 |
@@ -211,7 +211,7 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 
 报告内容：
 
-- 全量 test acc；
+- 训练未见 held-out acc（官方 test 无答案，见 2.1）；
 - 单选/多选 acc；
 - 6 个大类及 28 个子类 acc；
 - 微调前、LoRA 后、量化后三者对照；
@@ -420,8 +420,8 @@ Qwen3.5 vLLM 支持说明：<https://docs.vllm.ai/en/stable/models/supported_mod
 
 - [ ] M1：环境与依赖已锁定、text-only 4 卡加载 ✅（parity/全量冒烟实测）；待补 32 条生成 smoke 与原始 CMB baseline 记录。
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
-- [ ] M3：进行中——LoRA 正式训练 4×3090 运行中（2026-08-19 启动，73.5 s/步 × 1250 步/epoch）；parity 3/3 ✅；checkpoint resume 机制就绪（watchdog 自动续训），待主动实测。
-- [ ] M4：未开始（修复后的 logprob 评测入口就绪，base 评测待跑）。
+- [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
+- [ ] M4：进行中——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）；待补 6 大类/28 子类 breakdown 与选项重排一致性。
 - [ ] M5：未开始（serve_vllm/bench 入口就绪，TPOT 已改为服务端真实 token 计量）。
 - [ ] M6：未开始。
 - [ ] M7：未开始（扩展项，不影响主线交付）。

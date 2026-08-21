@@ -60,15 +60,30 @@ def main() -> None:
                         help="剥离视觉塔按 text-only 加载（与 train_lora 的加载路径一致，对比训练前后必须同开同关）")
     args = parser.parse_args()
 
+    # 增量落盘 + 断点续跑：test 全量 11,200 条 ≈ 25h，机器上曾出现外部干扰杀掉长任务的情况；
+    # 每 100 条把已处理结果写入 <output>.partial，重启同一命令自动按数据顺序跳过已处理记录。
+    partial_path = args.output.with_name(args.output.name + ".partial")
+    results: list[dict] = []
+    correct = 0
+    scored = 0
+    by_type: dict[str, list[int]] = {}
+    resumed = 0
+    if partial_path.exists() and not args.output.exists():
+        state = json.loads(partial_path.read_text(encoding="utf-8"))
+        results = state["results"]
+        correct = state["correct"]
+        scored = state["scored"]
+        by_type = state["by_type"]
+        resumed = len(results)
+        print(f"[resume] 断点继续:已处理 {resumed} 条,当前 acc={correct / max(scored, 1):.4f}", flush=True)
+
     processor = load_processor(args.model)
     tokenizer = getattr(processor, "tokenizer", processor)
     model = load_model(args.model, device_map="auto", text_only=args.text_only, peft_adapter=args.peft_adapter)
     model.eval()
-    results = []
-    correct = 0
-    scored = 0
-    by_type: dict[str, list[int]] = {}
     for index, record in enumerate(iter_jsonl(args.data)):
+        if index < resumed:
+            continue
         if args.limit is not None and index >= args.limit:
             break
         gold = gold_answer(record)
@@ -89,12 +104,18 @@ def main() -> None:
                         "scores": scores, "prediction": prediction,
                         "gold": gold, "correct": is_correct, "canonical_key": record.get("_canonical_key")})
         if (index + 1) % 20 == 0:
-            print(f"{index + 1} examples acc={correct / max(scored, 1):.4f}")
+            print(f"{index + 1} examples acc={correct / max(scored, 1):.4f}", flush=True)
+        if (index + 1) % 100 == 0:
+            tmp = partial_path.with_name(partial_path.name + ".tmp")
+            tmp.write_text(json.dumps({"results": results, "correct": correct, "scored": scored,
+                                       "by_type": by_type}, ensure_ascii=False), encoding="utf-8")
+            tmp.rename(partial_path)
     summary = {"data": str(args.data), "model": args.model, "records": len(results), "scored": scored,
                "accuracy": correct / scored if scored else 0,
                "accuracy_by_type": {key: sum(values) / len(values) for key, values in by_type.items()}}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({"summary": summary, "results": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+    partial_path.unlink(missing_ok=True)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
