@@ -35,7 +35,7 @@ Qwen3.5 官方模型卡：<https://huggingface.co/Qwen/Qwen3.5-9B>、<https://hu
 - 数据管线：CMB 去重 269,093→239,895（去 29,198），SFT 80,000 条 / 无效丢弃 0，val 280 条（manifest 见 out/manifests/）；
 - 测试：21 个单测全部通过，ruff 0 错误。
 
-尚未完成：vLLM 服务与压测真实数字、量化格式对照、跨题库/通用保持评测（M5-M6）。
+尚未完成：固定 trace 压测全档位真实数字（c1 已出，c4/c8/c16 与 seeded 档进行中）、跨题库/通用保持评测（M5-M6）。
 
 ### 0.2 快速开始
 
@@ -325,6 +325,24 @@ Qwen3.5 vLLM 支持说明：<https://docs.vllm.ai/en/stable/models/supported_mod
 
 自研 INT8 后续必须包含：校准集、权重/激活 scale、逐层误差、端到端 logits parity，以及真实推理 kernel 或可加载导出格式；否则只作为离线算法实验。
 
+#### 实测结果（2026-08-22，GPTQ W4A16 group=128，校准 CMB train 前 512 条 seqlen=512）
+
+| 指标 | BF16 merged | GPTQ W4A16 |
+|---|---|---|
+| val acc（280 条 logprob） | 71.07% | **72.86%**（Δ+1.79，量化噪声量级） |
+| 权重体积 | 21.7 GiB | **7.28 GiB**（-66%） |
+| 服务显存（单卡） | 21.8 GiB | ~11.0 GiB |
+| c1 生成吞吐（engine 窗口） | 44.7 tok/s | **108 tok/s**（2.4×） |
+| c1 prefill 吞吐 | 198-201 tok/s | 392-441 tok/s（2.0×） |
+
+服务正确性必须按**同权重**口径对照（vllm 引擎 vs transformers 前向，教师强制）：
+
+- BF16：280 条 242 逐 token 一致，38 条分歧全部 near-tie（候选 margin ≤0.25 nats）；教师强制 Δlogp mean 0.0089 / max 0.133；
+- GPTQ（同权重，--dtype float16）：280 条 **271 逐 token 一致**，9 条分歧样本内 Δlogp mean ≤0.004；教师强制 Δlogp **mean 0.0016 / max 0.0235**；
+- 跨权重对照（vllm-GPTQ vs transformers-bf16）混入量化漂移（Δlogp mean 0.066 / max 1.77、greedy 分歧 177/280），只能用于量化敏感性分析，不能当服务正确性证据：177 处分歧中 149 处可算 bf16 侧 margin，**55.7% 在 ≤0.15 nats 的 near-tie 区间**，大 margin 分歧集中在序列早期风格 token，不改变选择题答案（val acc 持平已实证）。
+
+导出链路（serving/quant_export.py）与已知坑：optimum 2.3.0 + gptqmodel 7.3.4 后端；量化必须用文本视图（Qwen3_5ForCausalLM，无视觉塔省 ~2GiB）；32 维状态投影层（linear_attn.in_proj_a/b，48 个）在 gptqmodel 加载时被 AUTO 内核选成 MarlinLinear 会抛 NotImplementedError（out_features 需被 64 整除），解法是 config 的 quantization_config 加 `backend: "gptq_triton"`（或导出时用 modules_in_block_to_quantize 排除）；vllm 0.19.0 只认 `checkpoint_format: "gptq_v2"` 键识别 v2 格式（optimum 写的是 format），缺键会按 v1 解包出 NaN；vllm GPTQ 只支持 fp16 激活（bf16 → ValidationError），外壳 config 的 torch_dtype 必须改 float16。权重键需幂等规范化到 `model.language_model.*`（remap_language_model_keys，实测三目录键布局）再换多模态外壳（--shell-dir 或 base HF 目录）。
+
 ### 5.3 压测请求集
 
 第一版不用模糊的“agentic 负载”，而是先生成固定 trace：
@@ -338,6 +356,19 @@ Qwen3.5 vLLM 支持说明：<https://docs.vllm.ai/en/stable/models/supported_mod
 - 指标：TTFT、TPOT（服务端 usage 回传的真实 completion_tokens，`stream_options.include_usage`；服务端不回传时降级为字符口径并在结果中留痕 `token_source`）、端到端延迟、吞吐、p50/p95/p99、GPU 显存和功耗。
 
 只有固定 trace 稳定后，才加入多轮工具调用，并同时报告请求级 prefix reuse 比例和引擎级 cache 指标。
+
+#### 实测结果（2026-08-22 起，串行跑，结果实时入表）
+
+workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预热 20 次 + 正式 100 次（每档 9,000 正式请求）；输入 256/1024/3072 token，输出 32/128/512 token。bf16 服务 GPU 4、GPTQ 服务 GPU 5，gpu_monitor.py 全程采集显存/功耗。
+
+| 模型 | 并发 | 采样 | TTFT p50/p95/p99 (ms) | TPOT p50/p95/p99 (ms) | e2e p50/p99 (ms) | 生成吞吐 | 完成状态 |
+|---|---|---|---|---|---|---|---|
+| bf16 | 1 | greedy | 进行中 | | | 44.7 tok/s（engine） | c1 |
+| gptq | 1 | greedy | 进行中 | | | 108 tok/s（engine） | c1 |
+| bf16 | 4/8/16 | greedy | 排队 | | | | |
+| bf16 | 1/4/8/16 | seeded | 排队 | | | | |
+
+（正式数字由 serving/analyze_bench.py 汇总 out/bench/bench_*.json 生成，不手工转抄。）
 
 ---
 
@@ -421,7 +452,7 @@ Qwen3.5 vLLM 支持说明：<https://docs.vllm.ai/en/stable/models/supported_mod
 - [ ] M1：环境与依赖已锁定、text-only 4 卡加载 ✅（parity/全量冒烟实测）；待补 32 条生成 smoke 与原始 CMB baseline 记录。
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
 - [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
-- [ ] M4：进行中——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）；待补 6 大类/28 子类 breakdown 与选项重排一致性。
-- [ ] M5：未开始（serve_vllm/bench 入口就绪，TPOT 已改为服务端真实 token 计量）。
+- [x] M4：完成——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）。6 大类 breakdown（exam_type）：六类全部提升，医师考试 +3.50pt（p=1.1e-7）、专业知识 +5.74pt（p=2.2e-8）、药师 +7.73pt（p=9.6e-7）等，12 个 exam_class 无一下降（护理学 +13.64pt、主管药师 +11.86pt 最大，详见 out/eval/heldout_breakdown.md）。选项重排一致性（生成式 300 条，seed 20260818）：orig 82.0% vs shuffled 79.7%，逐条一致性 94.3%（17 条不一致中 5 条为纯位置依赖），见 out/eval/shuffle_consistency.json。
+- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测实测生成吞吐 108 vs 44.7 tok/s（engine 10s 窗口）；固定 trace 压测（90 组 × 100 正式 = 9,000 请求/档 × 并发 1/4/8/16 × {greedy,seeded}）进行中，结果入 5.3 表。
 - [ ] M6：未开始。
 - [ ] M7：未开始（扩展项，不影响主线交付）。
