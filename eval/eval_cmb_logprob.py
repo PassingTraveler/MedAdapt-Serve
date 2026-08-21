@@ -54,11 +54,15 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=PATHS.eval / "cmb_logprob.json")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=4096)
+    parser.add_argument("--peft-adapter", type=str, default=None,
+                        help="LoRA adapter 目录（如 out/checkpoints/lora/checkpoint-1250），加载后用于评测")
+    parser.add_argument("--text-only", action="store_true",
+                        help="剥离视觉塔按 text-only 加载（与 train_lora 的加载路径一致，对比训练前后必须同开同关）")
     args = parser.parse_args()
 
     processor = load_processor(args.model)
     tokenizer = getattr(processor, "tokenizer", processor)
-    model = load_model(args.model, device_map="auto")
+    model = load_model(args.model, device_map="auto", text_only=args.text_only, peft_adapter=args.peft_adapter)
     model.eval()
     results = []
     correct = 0
