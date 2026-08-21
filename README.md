@@ -107,7 +107,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m eval.eval_cmb_logprob \
 
 1. **logprob 评测答案泄漏**：候选池原按 gold 答案宽度生成（多选"选错个数永不判错"），现只由 `question_type` 决定——多选评全部 2..n 元组合（n=5 时 26 个候选），val 中 40/280 条多选题受影响；
 2. **TPOT 用字符近似**：bench 现请求 `stream_options.include_usage`，TPOT/吞吐改用服务端回传的真实 completion_tokens；服务端不回传时降级字符口径并在结果留痕 `token_source`；workload 无 tokenizer 必须显式 `--char-fallback`，不允许静默降级；
-3. **依赖未锁定**：requirements-train/-serve/-smoke.txt 与 pyproject.toml 已 pin 到 omni 实测版本（torch 2.8.0+cu129、transformers 5.15.0；vllm 0.27.1 待服务冒烟复核）；
+3. **依赖未锁定**：requirements-train/-serve/-smoke.txt 与 pyproject.toml 已 pin 到 omni 实测版本（torch 2.8.0+cu129、transformers 5.15.0；vllm 0.19.0 实测可用——0.20+ 为 CUDA 13 构建，本机驱动 575.57.08 跑不了，依据见 requirements-serve.txt）；
 4. **测试单薄**：新增 zip 解压安全、跨 split 去重、候选池、标签屏蔽、压测统计共 7 个测试类，21 个单测全通过；
 5. **README 与实际状态漂移**：0.1 已按实测数字重写（本节即整改记录）；
 6. **可移植性/安全**：serve 默认只监听 127.0.0.1（`--host` 显式指定才对外）；zip 解压拒绝绝对路径与 `../` 穿越成员；watchdog 的目录/conda/GPU 均支持环境变量覆盖；

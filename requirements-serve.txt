@@ -1,6 +1,14 @@
 # 服务环境。注意：与 requirements-train.txt（transformers==5.15.0）分开安装，
 # 两个环境混装会导致 vllm 的 transformers/torch pin 冲突。
-# vllm pin 取 2026-08 PyPI 最新版；服务冒烟实测后如需调整在此更新。
+# vllm pin 依据（2026-08-21 实测，此前注释称 0.26.0 为 CUDA12.9 时代，实测纠正）：
+#   - 0.20+ 固定 torch==2.11.0；其 PyPI 默认构建是 +cu130（CUDA 13 运行时），
+#     vllm megawheel 核心库 ldd 链接 libcudart.so.13，需要驱动 >=580。
+#     本机驱动 575.57.08（CUDA 12.9）实测报 "driver too old (found version 12090)"。
+#   - 0.17-0.19 固定 torch==2.10.0；其 PyPI 默认构建 = cu12.8（wheel METADATA:
+#     Requires nvidia-cuda-runtime-cu12==12.8.90）。vllm 0.19.0 核心库实测链接
+#     libcudart.so.12，本机驱动可用；且 0.19.0 注册了
+#     Qwen3_5ForConditionalGeneration（registry.py:515）。
+#   - 升级驱动前不要升 0.20+。
 -r requirements-smoke.txt
-openai>=1.60,<2
-vllm==0.27.1
+openai>=2.0.0,<3  # vllm 0.19.0 依赖 openai>=2.0.0（旧 <2 pin 会造成 ResolutionImpossible）
+vllm==0.19.0

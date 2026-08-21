@@ -10,20 +10,25 @@ from pathlib import Path
 import requests
 
 
-def stream_request(base_url: str, model: str, row: dict, timeout: int = 180) -> dict:
+def stream_request(base_url: str, model: str, row: dict, timeout: int = 180,
+                   temperature: float = 0.0, seed: int | None = None) -> dict:
     started = time.perf_counter()
     first_token = None
     output = []
     error = None
     usage = None
+    body = {"model": model, "messages": row["messages"], "temperature": temperature,
+            "max_tokens": row["expected_output_tokens"], "stream": True,
+            # OpenAI 兼容接口的 usage 回传：拿服务端真实 token 计数（vLLM 支持）。
+            "stream_options": {"include_usage": True}}
+    # README 5.3：greedy 和固定 seed 的 sampling 分开跑；seeded 模式显式传 seed。
+    if seed is not None:
+        body["seed"] = seed
     try:
         response = requests.post(
             base_url.rstrip("/") + "/chat/completions",
             headers={"Content-Type": "application/json"},
-            json={"model": model, "messages": row["messages"], "temperature": 0,
-                  "max_tokens": row["expected_output_tokens"], "stream": True,
-                  # OpenAI 兼容接口的 usage 回传：拿服务端真实 token 计数（vLLM 支持）。
-                  "stream_options": {"include_usage": True}},
+            json=body,
             stream=True,
             timeout=timeout,
         )
@@ -39,8 +44,13 @@ def stream_request(base_url: str, model: str, row: dict, timeout: int = 180) -> 
             except json.JSONDecodeError:
                 continue
             if data.get("usage"):
+                # vllm 的 usage-only 结束块 choices=[]，跳过（否则下一行取 [0] 越界）。
                 usage = data["usage"]
-            delta = data.get("choices", [{}])[0].get("delta", {}).get("content")
+                continue
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {}).get("content")
             if delta:
                 # 只有首个内容块计 TTFT；usage-only 结束块不计。
                 if first_token is None:
@@ -106,8 +116,15 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--formal-per-group", type=int, default=100, help="Formal measured requests per (input_bucket, reuse_group)")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--sampling", choices=("greedy", "seeded"), default="greedy",
+                        help="greedy=temperature 0；seeded=固定 seed 的随机采样（README 5.3 分开跑）")
+    parser.add_argument("--seed", type=int, default=20260818)
+    parser.add_argument("--temperature", type=float, default=0.8,
+                        help="仅 seeded 模式生效；greedy 固定为 0")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    temperature = 0.0 if args.sampling == "greedy" else args.temperature
+    seed = None if args.sampling == "greedy" else args.seed
     rows = [json.loads(line) for line in args.workload.read_text(encoding="utf-8").splitlines() if line.strip()]
     rows = rows[: args.limit] if args.limit else rows
 
@@ -116,10 +133,11 @@ def main() -> None:
     for row in rows:
         groups.setdefault((row["input_bucket"], row.get("prefix_mode", "fixed"), row["reuse_group"]), []).append(row)
 
-    # 预热：每组前 --warmup 条顺序跑。
+    # 预热：每组固定 --warmup 次，行不足时循环复用（README 5.3：每组预热 20 次）。
     for key, group in sorted(groups.items()):
-        for row in group[: args.warmup]:
-            stream_request(args.base_url, args.model, row)
+        for i in range(args.warmup):
+            stream_request(args.base_url, args.model, group[i % len(group)],
+                           temperature=temperature, seed=seed)
 
     # 正式：每组 --formal-per-group 次，行不足时循环复用（保持固定 trace 可复现）。
     formal_rows = []
@@ -129,7 +147,8 @@ def main() -> None:
 
     measured = []
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = [executor.submit(stream_request, args.base_url, args.model, row) for row in formal_rows]
+        futures = [executor.submit(stream_request, args.base_url, args.model, row,
+                                   temperature=temperature, seed=seed) for row in formal_rows]
         for future in as_completed(futures):
             measured.append(future.result())
 
@@ -144,6 +163,11 @@ def main() -> None:
         "model": args.model,
         "workload": str(args.workload),
         "concurrency": args.concurrency,
+        # 采样口径留痕（README 5.3：greedy 与固定 seed 的 sampling 分开报告）。
+        "sampling": args.sampling,
+        "temperature": temperature,
+        "seed": seed,
+        "stop": "max_tokens",
         "requests": len(measured),
         "failed": len(failed),
         "error_rate": len(failed) / len(measured) if measured else 0,

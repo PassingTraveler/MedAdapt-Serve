@@ -41,7 +41,11 @@ def measure_tokens(tokenizer, messages: list[dict]) -> int | None:
     if tokenizer is None:
         return None
     encoded = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-    return len(encoded["input_ids"] if isinstance(encoded, dict) else encoded)
+    # transformers 5.x 的 tokenize=True 返回 BatchEncoding（继承 UserDict，不是 dict
+    # 子类，isinstance(dict) 判断会漏）；老版本返回纯 id 列表。两种都归一成 id 序列。
+    if hasattr(encoded, "input_ids"):
+        return len(encoded["input_ids"])
+    return len(encoded)
 
 
 def sized_filler(tokenizer, target_tokens: int) -> str:

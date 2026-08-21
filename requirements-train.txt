@@ -5,7 +5,11 @@
 # transformers==5.15.0 与 vllm 对 transformers/torch 的严格 pin 会冲突。
 -r requirements-smoke.txt
 --extra-index-url https://download.pytorch.org/whl/cu129
-numpy==1.26.4
+# numpy 原 pin 1.26.4（训练/评测实测）；2026-08-21 装 gptqmodel 7.3.4 做 GPTQ 导出时
+# 被其硬性依赖 numpy==2.2.6 强制升级。训练/评测管线在 numpy 2.2.6 下 import 与
+# torch.cuda 均已复验。若要复现训练环境请先按此文件装 1.26.4，再做 GPTQ 导出。
+numpy==2.2.6
+scipy==1.15.3
 torch==2.8.0+cu129
 accelerate==1.14.0
 peft==0.20.0
