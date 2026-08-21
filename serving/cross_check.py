@@ -65,14 +65,22 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--max-tokens", type=int, default=16)
     parser.add_argument("--output", type=Path, default=PATHS.eval / "cross_check.json")
+    parser.add_argument("--dtype", default="bfloat16",
+                        help="transformers 侧加载 dtype;量化模型必须 float16(vllm GPTQ 侧即 "
+                             "fp16 激活,bf16 加载实测 lm_head matmul dtype 冲突)")
     args = parser.parse_args()
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-    model = (AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16)
-             .to("cuda").eval())
+    # 量化模型(gptqmodel TritonV2Linear 等)不支持先 cpu 加载再 .to("cuda")
+    # (实测 ValueError: does not support device: cpu),必须 device_map 在加载时
+    # 分发到 GPU;bf16 模型两种方式数值等价,统一走 device_map。
+    model = (AutoModelForCausalLM.from_pretrained(args.model_dir,
+                                                  torch_dtype=getattr(torch, args.dtype),
+                                                  device_map="auto").eval())
+    input_device = model.device
 
     results = []
     for index, prompt in enumerate(load_prompts(args.samples, args.limit)):
@@ -82,26 +90,26 @@ def main() -> None:
         new_ids = full_ids[len(prompt_ids):]
 
         # 1) greedy 自生成:两边各自 argmax,比较 token 序列是否逐位一致。
-        ids = torch.tensor([prompt_ids], device="cuda")
+        ids = torch.tensor([prompt_ids], device=input_device)
         chosen: list[int] = []
         with torch.no_grad():
             for _ in range(len(new_ids)):
                 logits = model(input_ids=ids).logits
                 top = int(torch.argmax(logits[0, -1]).item())
                 chosen.append(top)
-                ids = torch.cat([ids, torch.tensor([[top]], device="cuda")], dim=1)
+                ids = torch.cat([ids, torch.tensor([[top]], device=input_device)], dim=1)
 
         # 2) 教师强制:vllm 生成的序列喂 transformers 前向,逐位对比 logprob。
         # 两边前缀一致,全序列 diff 都有意义(greedy 分歧后自生成侧 diff 无意义,
         # 会混入跨分支噪声,不能用来判数值对齐)。
-        ids = torch.tensor([prompt_ids], device="cuda")
+        ids = torch.tensor([prompt_ids], device=input_device)
         forced_logprobs: list[float] = []
         with torch.no_grad():
             for t in range(len(new_ids)):
                 logits = model(input_ids=ids).logits
                 logprob = float(torch.log_softmax(logits[0, -1].float(), dim=-1)[new_ids[t]].item())
                 forced_logprobs.append(logprob)
-                ids = torch.cat([ids, torch.tensor([[new_ids[t]]], device="cuda")], dim=1)
+                ids = torch.cat([ids, torch.tensor([[new_ids[t]]], device=input_device)], dim=1)
 
         vllm_logprobs = served["token_logprobs"]
         aligned = len(vllm_logprobs) == len(new_ids)
