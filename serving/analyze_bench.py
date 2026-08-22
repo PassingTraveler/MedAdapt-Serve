@@ -29,6 +29,9 @@ def main() -> None:
     parser.add_argument("--bench-dir", type=Path, default=Path("out/bench"))
     parser.add_argument("--monitor", type=Path, default=Path("out/bench/gpu_monitor_bf16.jsonl"))
     parser.add_argument("--models", nargs="+", default=("bf16", "gptq"))
+    parser.add_argument("--after-ts", type=float, default=0.0,
+                        help="monitor 采样起始 ts(相对首行);服务晚于监控启动时传该服务的首活跃 ts,"
+                             "避免把服务未启动的空窗拉低显存/功耗均值")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -36,11 +39,16 @@ def main() -> None:
     if args.monitor.exists():
         monitor = [json.loads(line) for line in args.monitor.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    # 每模型对应 GPU 的全过程均值
+    # 每模型对应 GPU 的服务窗口均值(从 --after-ts 起,默认全程)。
+    # bench 请求的 started/ended 与 monitor ts 同为 time.perf_counter 时间轴,
+    # 但两者起点不同(monitor ts 从 monitor 启动计),不能直接互切;GPU 显存
+    # 服务期内恒定、功耗随负载,全程均值即可代表该服务的部署成本。
     gpu_stats: dict[str, dict] = {}
     for model, gpu in GPU_FOR_MODEL.items():
         samples = []
         for row in monitor:
+            if row["ts"] < args.after_ts:
+                continue
             if gpu in row.get("gpus", {}):
                 samples.append(row["gpus"][gpu])
         if samples:
@@ -63,8 +71,15 @@ def main() -> None:
                     rows.append(row)
                     print(f"| {model} {sampling} c{conc} | MISSING |")
                     continue
-                summary = json.loads(path.read_text(encoding="utf-8")).get("summary", {})
+                data = json.loads(path.read_text(encoding="utf-8"))
+                summary = data.get("summary", {})
                 ttft, tpot, e2e = (stats_of(summary, k) for k in ("ttft_ms", "tpot_ms", "e2e_ms"))
+                # bench.py 的 summary 只存了速率不存墙钟,从请求级 started/ended 还原
+                # (两者同为 perf_counter 时间轴)。
+                reqs = data.get("requests") or []
+                starts = [r["started"] for r in reqs if r.get("started") is not None]
+                ends = [r["ended"] for r in reqs if r.get("ended") is not None]
+                wall = round((max(ends) - min(starts)), 1) if starts and ends else None
                 row.update({
                     "status": "ok",
                     "requests": summary.get("requests"),
@@ -76,7 +91,7 @@ def main() -> None:
                     "tpot_p99": fmt(tpot.get("p99")),
                     "e2e_p50": fmt(e2e.get("p50")), "e2e_p99": fmt(e2e.get("p99")),
                     "out_tok_s": round(summary.get("completion_tokens_per_second") or 0, 1),
-                    "wall_s": round(summary.get("wall_clock_seconds") or 0),
+                    "wall_s": wall,
                     "req_s": round(summary.get("requests_per_second") or 0, 2),
                 })
                 rows.append(row)
