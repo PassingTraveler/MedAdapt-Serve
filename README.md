@@ -369,7 +369,7 @@ workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预�
 | gptq | 4 | greedy | 214.7/391.5/440.6 | 9.9/12.4/12.4 | 1629.7/5852.4 | 339.7 | ✅ 0 失败 |
 | gptq | 8 | greedy | 360.7/688.4/724.2 | 14.5/17.3/19.5 | 2359.4/8426.6 | 480.6 | ✅ 0 失败 |
 | gptq | 16 | greedy | 461.9/662.5/725.7 | 26.4/29.8/36.1 | 4038.4/13877.5 | 572.3 | ✅ 0 失败 |
-| bf16 | 1 | greedy | 146.4/160.4/163.7 | 21.1/21.3/21.4 | 2841.6/11088.9 | 45.8 | ✅ 0 失败 |
+| bf16 | 1 | greedy | 146.4/160.4/163.7 | 21.1/21.3/21.4 | 2841.6/11089.0 | 45.8 | ✅ 0 失败 |
 | bf16 | 4/8/16 | greedy | c4 运行中 | | | | |
 | bf16 | 1/4/8/16 | seeded | 排队 | | | | |
 | gptq | 1 | seeded | 运行中（12:08 启动） | | | | |
@@ -459,6 +459,6 @@ workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预�
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
 - [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
 - [x] M4：完成——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）。6 大类 breakdown（exam_type）：六类全部提升，医师考试 +3.50pt（p=1.1e-7）、专业知识 +5.74pt（p=2.2e-8）、药师 +7.73pt（p=9.6e-7）等，12 个 exam_class 无一下降（护理学 +13.64pt、主管药师 +11.86pt 最大，详见 out/eval/heldout_breakdown.md）。选项重排一致性（生成式 300 条，seed 20260818）：orig 82.0% vs shuffled 79.7%，逐条一致性 94.3%（17 条不一致中 5 条为纯位置依赖），见 out/eval/shuffle_consistency.json。
-- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测生成吞吐 110.8 vs 44.7 tok/s（gptq greedy c1/c4/c8/c16 已完成 0 失败，吞吐 110.8→339.7→480.6→572.3；seeded c1 运行中）；固定 trace 压测（90 组 × 100 正式 = 9,000 请求/档 × 并发 1/4/8/16 × {greedy,seeded}）进行中，结果入 5.3 表。
+- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测生成吞吐 110.8 vs 45.8 tok/s（gptq greedy c1/c4/c8/c16 已完成 0 失败，吞吐 110.8→339.7→480.6→572.3；seeded c1 运行中）；固定 trace 压测（90 组 × 100 正式 = 9,000 请求/档 × 并发 1/4/8/16 × {greedy,seeded}）进行中，结果入 5.3 表。
 - [ ] M6：未开始。
 - [ ] M7：未开始（扩展项，不影响主线交付）。
