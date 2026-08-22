@@ -48,6 +48,9 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=1024,
+                        help="生成上限;GSM8K 0-shot 推理在 256 下约 29% 截断"
+                             "(实测 380/1319 条顶满上限),取中间推理数字造成假阴性")
     args = parser.parse_args()
 
     rows = []
@@ -63,7 +66,7 @@ def main() -> None:
         prompt = item.get("prompt") or item.get("question") or item.get("messages")
         gold = normalize_gold(item.get("answer") if "answer" in item else item.get("target"))
         messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
-        response = requests.post(args.base_url.rstrip("/") + "/chat/completions", json={"model": args.model, "messages": messages, "temperature": 0, "max_tokens": 256}, timeout=180)
+        response = requests.post(args.base_url.rstrip("/") + "/chat/completions", json={"model": args.model, "messages": messages, "temperature": 0, "max_tokens": args.max_tokens}, timeout=300)
         response.raise_for_status()
         prediction = response.json()["choices"][0]["message"]["content"].strip()
         if gold is None:
@@ -78,7 +81,7 @@ def main() -> None:
         index += 1
     summary = {"records": len(rows), "scored": len(rows) - skipped, "skipped_missing_gold": skipped,
                "accuracy": correct / (len(rows) - skipped) if len(rows) - skipped else 0,
-               "model": args.model, "data": str(args.data)}
+               "model": args.model, "data": str(args.data), "max_tokens": args.max_tokens}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({"summary": summary, "results": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
