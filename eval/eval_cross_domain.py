@@ -13,6 +13,10 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument("--structured", action="store_true",
+                        help="structured outputs:强制输出 {'answer': 'X'} JSON")
+    parser.add_argument("--workers", type=int, default=1)
     # 直接复用 generate 评测的 run()，不再改写 sys.argv。
     generate_run(parser.parse_args())
 

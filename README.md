@@ -228,6 +228,19 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 - 检查 CMB train 与公开 test 的近重复；
 - 报告 CMB test 作为公开 benchmark 的局限，不能仅凭它证明获得了新医学知识。
 
+#### 跨题库实测（2026-08-23）：CMExam
+
+候选 MedBench/CMMLU 实测不可用（opencompass 版 MedBench 官方 test answer=null、ECNU 版仅公开数百题、CMMLU test 无答案），改用 **CMExam**（NeurIPS 2023，中国国家医师资格考试 NMLE 题源，与 CMB 出题源不同）：test 6,811 条经 canonical_key 与 CMB train 零重叠校验后保留 6,145 条（666 条重叠剔除）。
+
+**评测格式坑与修复**：CMB 同款 prompt（“请只输出答案字母”，max_tokens=32）下 base 与 LoRA 模型均无视指令，自由生成复述/思考链，32 token 截断在题干阶段 → base 11.9% 低于随机水平（5 选 1 ~20%），属评测方法问题而非模型能力。修复：改用 **vLLM structured outputs**（`response_format=json_schema` 强制输出 `{"answer": "X"}`），两模型均严格遵守（实测小样本验证）。
+
+| 模型 | CMExam acc | Δ vs base | bootstrap 95% CI | McNemar |
+|---|---|---|---|---|
+| Qwen3.5-9B-Base | 78.54% (4,826/6,145) | — | — | — |
+| LoRA merged | 81.16% (4,987/6,145) | +2.62pt | [+1.81, +3.43] | 错→对 406 vs 对→错 245，p=2.9e-10 |
+
+结构化输出下跨题库也有稳定且显著的提升，方向与 held-out 主评测一致。
+
 ### 3.3 通用能力保持
 
 复用项目一的评测接口和答案抽取思想，不直接复用其 MiniMind 模型代码：
@@ -237,6 +250,17 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 - 微调前后使用完全相同的 prompt、采样参数和 token budget；
 - 报告绝对变化、相对变化和置信区间；
 - “掉点小于 2 点”是观察标准，不是硬性承诺。
+
+#### GSM8K 实测（2026-08-23）
+
+0-shot，同 prompt（英文原题 + 逐步求解 + “####” 收尾指令），temperature 0，max_tokens=1024（256 下 380/1,319 条预测顶满上限截断、取到中间推理数字造成假阴性，已修复并重跑）。
+
+| 模型 | GSM8K acc | Δ vs base | bootstrap 95% CI | McNemar |
+|---|---|---|---|---|
+| Qwen3.5-9B-Base | 86.43% (1,140/1,319) | — | — | — |
+| LoRA merged | 85.52% (1,128/1,319) | −0.91pt | [−2.58, +0.76] | 错→对 58 vs 对→错 70，p≈0.33 |
+
+微调没有造成显著的通用数学能力损失（Δ 不显著、CI 含零），“掉点小于 2 点”的观察标准满足。
 
 ---
 
@@ -461,6 +485,6 @@ workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预�
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
 - [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
 - [x] M4：完成——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）。6 大类 breakdown（exam_type）：六类全部提升，医师考试 +3.50pt（p=1.1e-7）、专业知识 +5.74pt（p=2.2e-8）、药师 +7.73pt（p=9.6e-7）等，12 个 exam_class 无一下降（护理学 +13.64pt、主管药师 +11.86pt 最大，详见 out/eval/heldout_breakdown.md）。选项重排一致性（生成式 300 条，seed 20260818）：orig 82.0% vs shuffled 79.7%，逐条一致性 94.3%（17 条不一致中 5 条为纯位置依赖），见 out/eval/shuffle_consistency.json。
-- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测生成吞吐 110.8 vs 45.8 tok/s（gptq greedy c1/c4/c8/c16 已完成 0 失败，吞吐 110.8→339.7→480.6→572.3；seeded c1 完成 109.7，TPOT 与 greedy 持平）；固定 trace 压测（90 组 × 100 正式 = 9,000 请求/档 × 并发 1/4/8/16 × {greedy,seeded}）进行中，结果入 5.3 表。
-- [ ] M6：未开始。
+- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测生成吞吐 110.8 vs 45.8 tok/s（gptq greedy c1/c4/c8/c16 已完成 0 失败，吞吐 110.8→339.7→480.6→572.3；seeded c1 完成 109.7，TPOT 与 greedy 持平；bf16 greedy c1/c4/c8/c16 已完成 0 失败，吞吐 45.8→166.6→304.5→494.1）；固定 trace 压测剩余 bf16 seeded 档（c1/c4/c8/c16，GPU 4 串行，周日收尾）进行中，结果入 5.3 表。
+- [x] M6：跨题库 + 通用保持完成（2026-08-23）。**跨题库 CMExam**（NMLE 题源，6,145 条与 CMB train 零重叠）：structured outputs 修复格式坑后 LoRA 81.16% vs base 78.54%（Δ=+2.62pt，bootstrap 95%CI [+1.81,+3.43]，McNemar p=2.9e-10）；**通用保持 GSM8K test 1,319 条**：LoRA 85.52% vs base 86.43%（Δ=−0.91pt，CI [−2.58,+0.76] 含零、p≈0.33，无显著数学能力损失）。详见 3.2/3.3。
 - [ ] M7：未开始（扩展项，不影响主线交付）。
