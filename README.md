@@ -35,7 +35,7 @@ Qwen3.5 官方模型卡：<https://huggingface.co/Qwen/Qwen3.5-9B>、<https://hu
 - 数据管线：CMB 去重 269,093→239,895（去 29,198），SFT 80,000 条 / 无效丢弃 0，val 280 条（manifest 见 out/manifests/）；
 - 测试：21 个单测全部通过，ruff 0 错误。
 
-尚未完成：固定 trace 压测全档位真实数字（c1 已出，c4/c8/c16 与 seeded 档进行中）、跨题库/通用保持评测（M5-M6）。
+尚未完成：无。固定 trace 压测 13 档（greedy+seeded，0 失败，见 5.3）与 M6 跨题库/通用保持评测（CMExam/GSM8K，见 3.2/3.3）均已完成。
 
 ### 0.2 快速开始
 
@@ -383,9 +383,9 @@ Qwen3.5 vLLM 支持说明：<https://docs.vllm.ai/en/stable/models/supported_mod
 
 只有固定 trace 稳定后，才加入多轮工具调用，并同时报告请求级 prefix reuse 比例和引擎级 cache 指标。
 
-#### 实测结果（2026-08-22 起，串行跑，结果实时入表）
+#### 实测结果（2026-08-22~23，13 档全部完成）
 
-workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预热 20 次 + 正式 100 次（每档 9,000 正式请求）；输入 256/1024/3072 token，输出 32/128/512 token。bf16 服务 GPU 4、GPTQ 服务 GPU 5，gpu_monitor.py 全程采集显存/功耗。
+workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预热 20 次 + 正式 100 次（每档 9,000 正式请求，预热 1,800 次串行）；输入 256/1024/3072 token，输出 32/128/512 token。bf16 greedy 全档与 seeded c1 在 GPU 4 单 serve 串行；seeded c4/c8/c16 为缩短收尾拆到 GPU 5/6/7 三个独立 serve 并行（协议与单卡档一致：每档独立 serve、独立预热、独立引擎，无互扰）。gpu_monitor.py 全程采集显存/功耗。
 
 | 模型 | 并发 | 采样 | TTFT p50/p95/p99 (ms) | TPOT p50/p95/p99 (ms) | e2e p50/p99 (ms) | 生成吞吐 (tok/s) | 状态 |
 |---|---|---|---|---|---|---|---|
@@ -398,7 +398,21 @@ workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预�
 | bf16 | 8 | greedy | 479.7/882.9/976.1 | 23.9/28.2/31.9 | 3751.2/13230.1 | 304.5 | ✅ 0 失败 |
 | bf16 | 16 | greedy | 621.9/949.0/1019.3 | 31.0/37.5/45.3 | 4897.4/15731.4 | 494.1 | ✅ 0 失败 |
 | bf16 | 1 | seeded | 145.9/162.7/165.0 | 21.1/21.4/21.4 | 2849.5/11122.0 | 45.6 | ✅ 0 失败 |
+| bf16 | 4 | seeded | 288.8/526.8/596.7 | 22.2/25.9/26.0 | 3324.3/12206.6 | 163.7 | ✅ 0 失败 |
+| bf16 | 8 | seeded | 457.4/909.5/994.2 | 24.8/31.3/31.3 | 3806.9/13517.0 | 298.2 | ✅ 0 失败 |
+| bf16 | 16 | seeded | 566.0/1123.5/1696.5 | 30.0/34.8/46.7 | 4880.8/15854.6 | 494.4 | ✅ 0 失败 |
 | gptq | 1 | seeded | 124.3/134.7/137.9 | 8.4/8.7/8.7 | 1205.7/4571.8 | 109.7 | ✅ 0 失败 |
+
+seeded 与 greedy 同档吞吐差 ≤2.1%（采样开销）；bf16 seeded c16 的 TTFT p95/p99（1123.5/1696.5ms）高于 greedy 档（949.0/1019.3ms），中位数反而更低（566.0 vs 621.9），属长输出请求的排队尾，留档。
+
+#### GPU 服务成本（monitor 按各 serve 活动窗口截断，非全程均值）
+
+| 服务 | 窗口（serve 日志实测） | 显存均值 | 功耗均值 |
+|---|---|---|---|
+| bf16 serve（GPU 4） | 08-21 19:53:26 → 08-23 16:20 | 21.44 GiB | 342.8 W |
+| GPTQ serve（GPU 5） | 08-21 21:58:43 → 08-22 18:26:48 | 20.29 GiB | 295.9 W |
+
+同 0.88 gpu-memory-utilization 下两者都顶 KV 池上限（非模型权重主导），显存差 1.15 GiB；功耗差 46.9 W 含负载结构差异（bf16 窗口含 c1 长跑满载段），不能完全归因量化。seeded c4/c8/c16 的 GPU 5/6/7 并行服务（08-23 10:13:22 → 16:20）显存 21.39-21.46 GiB，与 GPU 4 口径一致。
 
 （正式数字由 serving/analyze_bench.py 汇总 out/bench/bench_*.json 生成，不手工转抄。）
 
@@ -485,6 +499,6 @@ workload：3 输入桶 × 3 prefix 模式 × 10 复用组 = 90 组，每组预�
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
 - [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
 - [x] M4：完成——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）。6 大类 breakdown（exam_type）：六类全部提升，医师考试 +3.50pt（p=1.1e-7）、专业知识 +5.74pt（p=2.2e-8）、药师 +7.73pt（p=9.6e-7）等，12 个 exam_class 无一下降（护理学 +13.64pt、主管药师 +11.86pt 最大，详见 out/eval/heldout_breakdown.md）。选项重排一致性（生成式 300 条，seed 20260818）：orig 82.0% vs shuffled 79.7%，逐条一致性 94.3%（17 条不一致中 5 条为纯位置依赖），见 out/eval/shuffle_consistency.json。
-- [ ] M5：进行中——vLLM 0.19.0 服务与量化对照已落地（详见 5.1/5.2）：bf16 服务正确性 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16 对照**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），vllm-GPTQ vs transformers-GPTQ 同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235（比 bf16 对照还紧），权重 7.28 GiB vs bf16 21.7 GiB，c1 压测生成吞吐 110.8 vs 45.8 tok/s（gptq greedy c1/c4/c8/c16 已完成 0 失败，吞吐 110.8→339.7→480.6→572.3；seeded c1 完成 109.7，TPOT 与 greedy 持平；bf16 greedy c1/c4/c8/c16 已完成 0 失败，吞吐 45.8→166.6→304.5→494.1）；固定 trace 压测剩余 bf16 seeded 档（c1/c4/c8/c16，GPU 4 串行，周日收尾）进行中，结果入 5.3 表。
+- [x] M5：完成（2026-08-23）。vLLM 0.19.0 服务与量化对照：bf16 cross_check 280 条 242 逐 token 一致、38 分歧全部 near-tie（教师强制 Δlogp mean 0.0089 / max 0.133）；**GPTQ W4A16**：val 280 条 acc 72.86% vs bf16 merged 71.07%（无坍塌），同权重 cross_check 271/280 一致、教师强制 Δlogp mean 0.0016 / max 0.0235，权重 7.28 GiB vs bf16 21.7 GiB。固定 trace 压测 **13 档完成、0 失败**：gptq greedy c1/c4/c8/c16 吞吐 110.8→339.7→480.6→572.3 tok/s、seeded c1 109.7；bf16 greedy c1/c4/c8/c16 45.8→166.6→304.5→494.1、seeded c1/c4/c8/c16 45.6→163.7→298.2→494.4（seeded 与 greedy 同档差 ≤2.1%）。GPU 服务成本（monitor 服务窗口均值）：bf16 21.44 GiB/342.8 W vs GPTQ 20.29 GiB/295.9 W。
 - [x] M6：跨题库 + 通用保持完成（2026-08-23）。**跨题库 CMExam**（NMLE 题源，6,145 条与 CMB train 零重叠）：structured outputs 修复格式坑后 LoRA 81.16% vs base 78.54%（Δ=+2.62pt，bootstrap 95%CI [+1.81,+3.43]，McNemar p=2.9e-10）；**通用保持 GSM8K test 1,319 条**：LoRA 85.52% vs base 86.43%（Δ=−0.91pt，CI [−2.58,+0.76] 含零、p≈0.33，无显著数学能力损失）。详见 3.2/3.3。
 - [ ] M7：未开始（扩展项，不影响主线交付）。
