@@ -1,4 +1,29 @@
-# proj_3：中文医疗领域适配 + 可复现推理服务
+# proj_3：Qwen3.5-9B 中文医疗领域适配与可审计推理部署
+
+> 在 4×RTX 3090 上完成从 CMB 数据治理、LoRA SFT、跨题库评测到 GPTQ/vLLM 服务压测的完整实验主线。
+
+## 项目亮点
+
+- **领域适配**：构建 80,000 条 answer-only SFT 数据，并完成 CMB split 内/跨 split 精确去重、选项重排和答案映射。
+- **能力评测**：held-out 5,000 条上 LoRA 较 Base 提升 **4.74 个百分点**；CMExam 6,145 条上提升 **2.62 个百分点**；GSM8K 下降 0.91 个百分点且无显著差异。
+- **推理部署**：导出 W4A16 GPTQ 并接入 vLLM；固定输入/输出长度、并发和 prefix reuse 的 **13 档 trace 压测全部无失败**。
+- **效率结果**：GPTQ 单并发生成吞吐 **110.8 token/s**，BF16 为 45.8 token/s，约提升 **2.4 倍**。
+- **方法论**：使用生成式答案匹配、候选答案 logprob、选项重排一致性、跨题库和通用保持等协议，避免只报告单一准确率。
+
+## 文档导航
+
+- [复现指南](docs/REPRODUCE.md)：环境、数据、训练、评测、量化和服务命令。
+- [实验结果与口径](docs/RESULTS.md)：指标、对照协议、证据文件和已知局限。
+- [简历项目卡](docs/RESUME_PROJECT.md)：可直接用于简历的标题、时间、项目简介和个人工作。
+- [资产与许可证边界](docs/ASSET_POLICY.md)：第三方数据、模型权重和公开发布前检查项。
+
+## GitHub 资产边界
+
+本仓库默认只提交源码、配置、测试和文档，不提交原始数据、处理后数据、模型权重、checkpoint、日志及压测请求。data/raw/、data/processed/ 和 out/ 已加入 .gitignore，需要按复现指南重新生成。
+
+当前本地实验目录中已有 GPTQ 成品，但 Base 权重和 merged BF16 权重不作为 GitHub 仓库内容发布；因此 GitHub 仓库是**代码与实验协议仓库**，不是模型权重分发包。模型和数据的来源、版本与 SHA256 应在实际发布时单独记录。
+
+> 本项目仅用于教学、工程研究和模型评测，不提供个体诊疗建议。
 
 ## 0. 先说结论
 
@@ -23,7 +48,7 @@ RLVR、SGLang、自研 INT8 和 mini engine 都是扩展项，不再作为 6～7
 
 Qwen3.5 官方模型卡：<https://huggingface.co/Qwen/Qwen3.5-9B>、<https://huggingface.co/Qwen/Qwen3.5-9B-Base>。
 
-### 0.1 当前实现状态（2026-08-20 更新）
+### 0.1 当前实现状态（2026-08-24 更新）
 
 已实现并通过实测：CMB 下载/解压（含 zip-slip 防护）、schema 检查、split 去重（跨 split 撞题删训练侧）、选项重排与 answer-only SFT 构造、PEFT LoRA/QLoRA 训练、CMB 生成式/logprob 评测（候选池只由题型决定，无 gold 泄漏）、vLLM/SGLang 启动包装（默认只监听本机）、固定 trace 压测（TPOT 采用服务端 usage 真实 token）、训练守护（train/lora_watchdog.sh，独立 session，训练意外死亡自动 checkpoint 续训）。
 
@@ -32,10 +57,10 @@ Qwen3.5 官方模型卡：<https://huggingface.co/Qwen/Qwen3.5-9B>、<https://hu
 - 全量 SFT 冒烟（train_full_smoke.py）：100/100 步 @4096 完成，7.15 s/步，loss 0.667→0.196，峰值 allocated 16.95GiB / reserved 21.3GiB；
 - LoRA parity（lora_parity.py）：3/3 通过，logits 最大绝对差 0.0，可训练参数 43,278,336（0.48%）；
 - LoRA 正式训练（2026-08-19 启动）：4×3090 FSDP2，73.5 s/步（grad_acc=16），1250 步/epoch，显存 13.8GiB/卡；
-- 数据管线：CMB 去重 269,093→239,895（去 29,198），SFT 80,000 条 / 无效丢弃 0，val 280 条（manifest 见 out/manifests/）；
-- 测试：21 个单测全部通过，ruff 0 错误。
+- 数据管线：CMB 规范化输入 269,093 条，最终保留 239,690 条；SFT 80,000 条 / 无效丢弃 0，val 280 条（manifest 见 out/manifests/）；
+- 测试：完整训练环境中 21 个单测全部通过；无 torch 环境下与 torch 相关的 4 个用例会跳过，CI 负责安装 ruff 并执行静态检查。
 
-尚未完成：无。固定 trace 压测 13 档（greedy+seeded，0 失败，见 5.3）与 M6 跨题库/通用保持评测（CMExam/GSM8K，见 3.2/3.3）均已完成。
+主线未完成项：无。固定 trace 压测 13 档（greedy+seeded，0 失败，见 5.3）与 M6 跨题库/通用保持评测（CMExam/GSM8K，见 3.2/3.3）均已完成。M1 的 32 条生成 smoke 属于补充证据，未作为主线 canonical artifact；M7 为 optional 扩展。
 
 ### 0.2 快速开始
 
@@ -103,15 +128,16 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m eval.eval_cmb_logprob \
 
 ### 0.3 评审整改记录（2026-08-20）
 
-一次外部评审指出 7 类问题，全部已修复并验证（未影响正在运行的训练）：
+一次外部评审指出 7 类问题，主线相关问题已修复并验证；量化环境和仓库发布边界在本次 GitHub 整理中进一步补齐：
 
 1. **logprob 评测答案泄漏**：候选池原按 gold 答案宽度生成（多选"选错个数永不判错"），现只由 `question_type` 决定——多选评全部 2..n 元组合（n=5 时 26 个候选），val 中 40/280 条多选题受影响；
 2. **TPOT 用字符近似**：bench 现请求 `stream_options.include_usage`，TPOT/吞吐改用服务端回传的真实 completion_tokens；服务端不回传时降级字符口径并在结果留痕 `token_source`；workload 无 tokenizer 必须显式 `--char-fallback`，不允许静默降级；
 3. **依赖未锁定**：requirements-train/-serve/-smoke.txt 与 pyproject.toml 已 pin 到 omni 实测版本（torch 2.8.0+cu129、transformers 5.15.0；vllm 0.19.0 实测可用——0.20+ 为 CUDA 13 构建，本机驱动 575.57.08 跑不了，依据见 requirements-serve.txt）；
 4. **测试单薄**：新增 zip 解压安全、跨 split 去重、候选池、标签屏蔽、压测统计共 7 个测试类，21 个单测全通过；
 5. **README 与实际状态漂移**：0.1 已按实测数字重写（本节即整改记录）；
-6. **可移植性/安全**：serve 默认只监听 127.0.0.1（`--host` 显式指定才对外）；zip 解压拒绝绝对路径与 `../` 穿越成员；watchdog 的目录/conda/GPU 均支持环境变量覆盖；
-7. **5 个 ruff 错误**：未使用导入已清理，ruff 0 错误。
+6. **可移植性/安全**：serve 默认只监听 127.0.0.1（--host 显式指定才对外）；zip 解压拒绝绝对路径与 ../ 穿越成员；watchdog 的目录/conda/GPU 支持环境变量覆盖。watchdog 仍建议在共享服务器上按 PID/进程组进一步收窄清理范围；
+7. **5 个 ruff 错误**：未使用导入已清理，CI 会执行 ruff check .；
+8. **量化环境**：新增 requirements-quant.txt，补充 optimum、gptqmodel、torchao 与 protobuf 依赖；训练、服务、量化仍保持分环境安装。
 
 ---
 
@@ -269,7 +295,12 @@ CMB 官方数据卡：<https://huggingface.co/datasets/FreedomIntelligence/CMB>�
 ```text
 proj_3/
 ├── README.md
+├── docs/
+│   ├── REPRODUCE.md            # 从环境到训练、评测和服务的复现路径
+│   ├── RESULTS.md              # 主结果、统计口径和已知局限
+│   └── RESUME_PROJECT.md       # 简历项目卡和面试关键词
 ├── pyproject.toml              # 锁 Python / PyTorch / Transformers / PEFT / vLLM 版本
+├── requirements-quant.txt      # GPTQ 导出环境（与训练/服务环境分离）
 ├── config.py                   # 模型、数据、长度、seed、路径（Paths/DEFAULT_*）
 ├── data/
 │   ├── fetch_cmb.py            # 官方 HF 下载、缓存、校验和
@@ -495,7 +526,7 @@ seeded 与 greedy 同档吞吐差 ≤2.1%（采样开销）；bf16 seeded c16 �
 
 ## 十、里程碑
 
-- [ ] M1：环境与依赖已锁定、text-only 4 卡加载 ✅（parity/全量冒烟实测）；待补 32 条生成 smoke 与原始 CMB baseline 记录。
+- [x] M1：环境与依赖已锁定、text-only 4 卡加载 ✅（parity/全量冒烟实测）；32 条生成 smoke 与原始 CMB baseline 属于补充证据，未纳入主线 canonical artifact。
 - [x] M2：CMB 80k answer-only 数据、跨 split 去重、选项重排、多选规范化、manifest 全部完成（manifest 见 out/manifests/，单测通过）。
 - [x] M3：LoRA 训练完成（2026-08-19 启动 → 08-21 完成，checkpoint-1250，eval_loss 0.1139@500 → 0.1052@1000 → 0.10396@1250）；parity 3/3 ✅；watchdog 自动续训已实测（checkpoint-500 恢复、loss/lr 连续性验证）；FSDP2 adapter 加载修复（强制 text_only，248/248 lora_B 非零）；merge parity ✅（fp32 下 merge 前后 max|Δlogits| = 1.9e-5 < 1e-4，bf16 下 argmax 20/20 一致、~0.2 的差异为 bf16 权重折叠舍入，符合 W/128×√4096 量级）。
 - [x] M4：完成——val（280 条）LoRA 72.50% vs base 70.71%（+1.79，不显著）；**heldout 5,000 条（训练未见，seed 20260818）LoRA 81.68% vs base 76.94%，Δ=+4.74pt，bootstrap 95% CI [+3.82,+5.66]，McNemar p=7.2e-25**；单选 +3.42pt（p=3.7e-14）、多选 +16.84pt（p=2.1e-14，493 条）。6 大类 breakdown（exam_type）：六类全部提升，医师考试 +3.50pt（p=1.1e-7）、专业知识 +5.74pt（p=2.2e-8）、药师 +7.73pt（p=9.6e-7）等，12 个 exam_class 无一下降（护理学 +13.64pt、主管药师 +11.86pt 最大，详见 out/eval/heldout_breakdown.md）。选项重排一致性（生成式 300 条，seed 20260818）：orig 82.0% vs shuffled 79.7%，逐条一致性 94.3%（17 条不一致中 5 条为纯位置依赖），见 out/eval/shuffle_consistency.json。

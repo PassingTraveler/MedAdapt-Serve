@@ -1,0 +1,7 @@
+# GPTQ 导出环境。
+# 与 requirements-serve.txt 分开安装；量化导出依赖 transformers 5.x 与 gptqmodel。
+-r requirements-train.txt
+optimum==2.3.0
+gptqmodel==7.3.4
+torchao==0.17.0
+protobuf>=7.34,<8
